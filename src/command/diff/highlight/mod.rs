@@ -239,6 +239,7 @@ mod tests {
         assert!(extensions.contains(&"ex"), "Elixir config should be loaded");
         assert!(extensions.contains(&"exs"), "Elixir script config should be loaded");
         assert!(extensions.contains(&"zig"), "Zig config should be loaded");
+        assert!(extensions.contains(&"java"), "Java config should be loaded");
     }
 
     #[test]
@@ -366,6 +367,22 @@ pub fn unwrap(maybe: ?u32) void {
             Some(parameter_color),
             "FileHighlighter should preserve the payload binding highlight"
         );
+    }
+
+    #[test]
+    fn test_java_highlighting() {
+        let code = r#"package com.example;
+
+public class Hello {
+    public static void main(String[] args) {
+        System.out.println("Hello, Java!");
+    }
+}
+"#;
+        let result = highlight_code(code, "test.java");
+        assert!(!result.is_empty(), "Java highlighting should produce output");
+        let has_highlights = result.iter().any(|(_, h)| h.is_some());
+        assert!(has_highlights, "Java code should have syntax highlights");
     }
 
     #[test]
