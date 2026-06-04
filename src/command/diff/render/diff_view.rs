@@ -83,8 +83,8 @@ fn build_line_slots<'a, 'e>(
     slots
 }
 use crate::command::diff::types::{
-    ChangeType, DiffFullscreen, DiffLine, DiffPanelFocus, DiffViewSettings, FileDiff, FocusedPanel,
-    InlineSegment, Selection, SelectionMode, SidebarItem,
+    ChangeType, DiffFullscreen, DiffLine, DiffPanelFocus, DiffViewSettings, FileDiff, FileStatus,
+    FocusedPanel, InlineSegment, Selection, SelectionMode, SidebarItem,
 };
 use crate::command::diff::PrInfo;
 
@@ -1396,8 +1396,11 @@ pub fn render_diff(
     // side_by_side is now passed as a parameter (pre-computed and cached)
     let line_stats = compute_line_stats(side_by_side);
 
-    let is_new_file = diff.old_content.is_empty() && !diff.new_content.is_empty();
+    let is_view = matches!(diff.status, FileStatus::View);
+    let is_new_file =
+        (diff.old_content.is_empty() && !diff.new_content.is_empty()) || is_view;
     let is_deleted_file = !diff.old_content.is_empty() && diff.new_content.is_empty();
+    let neutral = is_view;
 
     // Track how many non-diff rows are at the top (context lines + file annotations)
     let content_row_offset: usize;
@@ -1513,7 +1516,7 @@ pub fn render_diff(
                 ));
 
                 let prefix = format!("{:4} ", num);
-                let gutter_bg = t.diff.added_gutter_bg;
+                let gutter_bg = if neutral { t.diff.context_bg } else { t.diff.added_gutter_bg };
                 let gutter_bg = if new_line_selected {
                     blend_with_selection(gutter_bg)
                 } else {
@@ -1524,7 +1527,13 @@ pub fn render_diff(
                     Style::default().fg(t.diff.added_gutter_fg).bg(gutter_bg),
                 ));
                 let matches = search_state.get_matches_for_line(line_idx, MatchPanel::New);
-                let line_bg = if hunk_viewed { bg } else { t.diff.added_bg };
+                let line_bg = if hunk_viewed {
+                    bg
+                } else if neutral {
+                    t.diff.context_bg
+                } else {
+                    t.diff.added_bg
+                };
                 let content_spans = apply_search_highlight(
                     text,
                     &diff.filename,
@@ -1562,9 +1571,14 @@ pub fn render_diff(
             }
         }
 
+        let panel_title = if neutral {
+            format!(" {} ", diff.filename)
+        } else {
+            " [2] New File ".to_string()
+        };
         let new_para = Paragraph::new(new_lines).scroll((0, h_scroll)).block(
             Block::default()
-                .title(Line::styled(" [2] New File ", title_style))
+                .title(Line::styled(panel_title, title_style))
                 .borders(Borders::ALL)
                 .border_style(border_style),
         );
