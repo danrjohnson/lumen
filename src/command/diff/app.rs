@@ -1372,6 +1372,7 @@ fn run_app_internal(
                                             FileStatus::Added => ModalFileStatus::Added,
                                             FileStatus::Modified => ModalFileStatus::Modified,
                                             FileStatus::Deleted => ModalFileStatus::Deleted,
+                                            FileStatus::View => ModalFileStatus::Modified,
                                         };
                                         FilePickerItem {
                                             name: diff.filename.clone(),

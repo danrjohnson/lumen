@@ -99,6 +99,7 @@ pub fn render_sidebar(
                         FileStatus::Modified => Some(t.ui.status_modified),
                         FileStatus::Added => Some(t.ui.status_added),
                         FileStatus::Deleted => Some(t.ui.status_deleted),
+                        FileStatus::View => None,
                     };
                     let status_symbol = status.symbol().to_string();
                     (
