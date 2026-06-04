@@ -149,6 +149,9 @@ async fn run() -> Result<(), LumenError> {
         Commands::Configure => {
             command::configure::ConfigureCommand::execute()?;
         }
+        Commands::View { .. } => {
+            unimplemented!("view command wired up in a later task");
+        }
     }
 
     Ok(())

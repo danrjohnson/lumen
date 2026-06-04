@@ -144,6 +144,28 @@ pub enum Commands {
         #[arg(long)]
         wrap: bool,
     },
+    /// View one or more files in the viewer (no repo required)
+    View {
+        /// One or more file paths to view
+        #[arg(required = true)]
+        files: Vec<String>,
+
+        /// Watch for file changes and auto-reload
+        #[arg(short, long)]
+        watch: bool,
+
+        /// Color theme (e.g., dracula, nord, gruvbox-dark)
+        #[arg(short, long)]
+        theme: Option<String>,
+
+        /// Soft-wrap long lines instead of scrolling horizontally
+        #[arg(long)]
+        wrap: bool,
+
+        /// Initially focus on this file path
+        #[arg(long)]
+        focus: Option<String>,
+    },
     /// Interactively configure Lumen (provider, API key)
     Configure,
 }
@@ -176,6 +198,40 @@ mod tests {
         match cli.command {
             Commands::Diff { wrap, .. } => assert!(wrap),
             _ => panic!("expected diff command"),
+        }
+    }
+
+    #[test]
+    fn test_view_parses_single_file() {
+        let cli = Cli::try_parse_from(["lumen", "view", "notes.md"]).unwrap();
+        match cli.command {
+            Commands::View { files, .. } => assert_eq!(files, vec!["notes.md".to_string()]),
+            _ => panic!("expected view command"),
+        }
+    }
+
+    #[test]
+    fn test_view_parses_multiple_files() {
+        let cli = Cli::try_parse_from(["lumen", "view", "a.rs", "b.rs"]).unwrap();
+        match cli.command {
+            Commands::View { files, .. } => {
+                assert_eq!(files, vec!["a.rs".to_string(), "b.rs".to_string()]);
+            }
+            _ => panic!("expected view command"),
+        }
+    }
+
+    #[test]
+    fn test_view_requires_a_file() {
+        assert!(Cli::try_parse_from(["lumen", "view"]).is_err());
+    }
+
+    #[test]
+    fn test_view_watch_flag() {
+        let cli = Cli::try_parse_from(["lumen", "view", "--watch", "a.rs"]).unwrap();
+        match cli.command {
+            Commands::View { watch, .. } => assert!(watch),
+            _ => panic!("expected view command"),
         }
     }
 }
