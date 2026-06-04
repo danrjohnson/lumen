@@ -338,6 +338,30 @@ fn detect_current_branch_pr() -> Result<String, String> {
     Ok(number)
 }
 
+pub fn run_view_ui(
+    files: Vec<String>,
+    watch: bool,
+    theme: Option<String>,
+    wrap: bool,
+    focus: Option<String>,
+) -> io::Result<()> {
+    use std::path::PathBuf;
+    let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+    let options = DiffOptions {
+        reference: None,
+        pr: None,
+        detect_pr: false,
+        file: None,
+        watch,
+        theme,
+        stacked: false,
+        focus,
+        origin: None,
+        wrap,
+    };
+    app::run_app_view(options, paths)
+}
+
 pub fn run_diff_ui(mut options: DiffOptions, backend: &dyn VcsBackend) -> io::Result<()> {
     // Resolve --detect-pr into options.pr
     if options.detect_pr && options.pr.is_none() {
