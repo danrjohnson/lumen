@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -433,6 +433,35 @@ fn parse_changed_files_from_diff(diff: &str) -> Vec<String> {
     files
 }
 
+/// Load files directly from disk for `lumen view` (no VCS).
+/// Each readable file becomes a neutral `FileStatus::View` FileDiff.
+/// Missing/unreadable paths and directories are skipped with a warning.
+pub fn load_view_files(paths: &[PathBuf]) -> Vec<FileDiff> {
+    let mut diffs = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            eprintln!("Warning: '{}' is a directory, skipping", path.display());
+            continue;
+        }
+        match fs::read_to_string(path) {
+            Ok(content) => {
+                let is_binary = is_binary_content(&content);
+                diffs.push(FileDiff {
+                    filename: path.display().to_string(),
+                    old_content: String::new(),
+                    new_content: content,
+                    status: FileStatus::View,
+                    is_binary,
+                });
+            }
+            Err(e) => {
+                eprintln!("Warning: cannot read '{}': {}", path.display(), e);
+            }
+        }
+    }
+    diffs
+}
+
 /// Load file diffs for a single commit (comparing commit to its parent).
 /// Uses VcsBackend for backend-agnostic file content retrieval.
 pub fn load_single_commit_diffs(
@@ -763,6 +792,62 @@ mod tests {
 
         let _ = std::env::set_current_dir(&original);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_view_files_reads_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hello.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        let diffs = load_view_files(&[path.clone()]);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].new_content, "fn main() {}\n");
+        assert!(diffs[0].old_content.is_empty());
+        assert_eq!(diffs[0].status, FileStatus::View);
+        assert!(!diffs[0].is_binary);
+    }
+
+    #[test]
+    fn load_view_files_reads_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "alpha").unwrap();
+        std::fs::write(&b, "beta").unwrap();
+        let diffs = load_view_files(&[a, b]);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].new_content, "alpha");
+        assert_eq!(diffs[1].new_content, "beta");
+    }
+
+    #[test]
+    fn load_view_files_skips_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.txt");
+        std::fs::write(&good, "ok").unwrap();
+        let missing = dir.path().join("nope.txt");
+        let diffs = load_view_files(&[missing, good]);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].new_content, "ok");
+    }
+
+    #[test]
+    fn load_view_files_skips_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        let diffs = load_view_files(&[subdir]);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn load_view_files_flags_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        std::fs::write(&path, b"abc\0def").unwrap();
+        let diffs = load_view_files(&[path]);
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].is_binary);
     }
 
     #[test]
