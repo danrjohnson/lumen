@@ -63,7 +63,7 @@ use crate::commit_reference::CommitReference;
 use crate::vcs::{StackedCommitInfo, VcsBackend};
 
 /// Where the file diffs come from and how to reload them.
-pub enum DiffSource<'a> {
+pub(crate) enum DiffSource<'a> {
     Vcs(&'a dyn VcsBackend),
     Pr(PrInfo),
     Disk(Vec<PathBuf>),
@@ -262,13 +262,9 @@ fn format_annotation_preview(annotation: &super::state::Annotation) -> String {
 pub fn run_app_with_pr(
     options: DiffOptions,
     pr_info: PrInfo,
-    backend: &dyn VcsBackend,
 ) -> io::Result<()> {
     match load_pr_file_diffs(&pr_info) {
-        Ok(file_diffs) => {
-            let _ = backend;
-            run_app_internal(options, DiffSource::Pr(pr_info), file_diffs, None)
-        }
+        Ok(file_diffs) => run_app_internal(options, DiffSource::Pr(pr_info), file_diffs, None),
         Err(_) => std::process::exit(1),
     }
 }
