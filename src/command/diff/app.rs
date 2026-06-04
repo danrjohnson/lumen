@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
@@ -39,6 +40,7 @@ use super::annotation::{AnnotationEditor, AnnotationEditorResult};
 use super::coordinates::{extract_selected_text, PanelLayout};
 use super::git::{
     get_current_branch, load_file_diffs, load_pr_file_diffs, load_single_commit_diffs,
+    load_view_files,
 };
 use super::highlight;
 use super::render::{
@@ -59,6 +61,13 @@ use spinoff::{spinners, Color, Spinner};
 
 use crate::commit_reference::CommitReference;
 use crate::vcs::{StackedCommitInfo, VcsBackend};
+
+/// Where the file diffs come from and how to reload them.
+pub enum DiffSource<'a> {
+    Vcs(&'a dyn VcsBackend),
+    Pr(PrInfo),
+    Disk(Vec<PathBuf>),
+}
 
 /// Navigate to a different commit in stacked mode.
 /// Returns true if navigation was successful.
@@ -266,7 +275,8 @@ pub fn run_app_with_pr(
     match load_pr_file_diffs(&pr_info) {
         Ok(file_diffs) => {
             spinner.success(&format!("Fetched {} files", file_diffs.len()));
-            run_app_internal(options, Some(pr_info), file_diffs, None, backend)
+            let _ = backend;
+            run_app_internal(options, DiffSource::Pr(pr_info), file_diffs, None)
         }
         Err(e) => {
             spinner.fail(&e);
@@ -277,11 +287,10 @@ pub fn run_app_with_pr(
 
 pub fn run_app(
     options: DiffOptions,
-    pr_info: Option<PrInfo>,
     backend: &dyn VcsBackend,
 ) -> io::Result<()> {
     let file_diffs = load_file_diffs(&options, backend);
-    run_app_internal(options, pr_info, file_diffs, None, backend)
+    run_app_internal(options, DiffSource::Vcs(backend), file_diffs, None)
 }
 
 pub fn run_app_stacked(
@@ -292,7 +301,12 @@ pub fn run_app_stacked(
     // Load the first commit's diff
     let first_commit = &commits[0];
     let file_diffs = load_single_commit_diffs(&first_commit.commit_id, &options.file, backend);
-    run_app_internal(options, None, file_diffs, Some(commits), backend)
+    run_app_internal(options, DiffSource::Vcs(backend), file_diffs, Some(commits))
+}
+
+pub fn run_app_view(options: DiffOptions, paths: Vec<PathBuf>) -> io::Result<()> {
+    let file_diffs = load_view_files(&paths);
+    run_app_internal(options, DiffSource::Disk(paths), file_diffs, None)
 }
 
 /// Sync viewed files from GitHub to local state
@@ -309,18 +323,31 @@ fn sync_viewed_files_from_github(pr_info: &PrInfo, state: &mut AppState) {
 
 fn run_app_internal(
     options: DiffOptions,
-    pr_info: Option<PrInfo>,
+    source: DiffSource<'_>,
     file_diffs: Vec<super::types::FileDiff>,
     stacked_commits: Option<Vec<StackedCommitInfo>>,
-    backend: &dyn VcsBackend,
 ) -> io::Result<()> {
+    let pr_info: Option<PrInfo> = match &source {
+        DiffSource::Pr(p) => Some(p.clone()),
+        _ => None,
+    };
+    let backend: Option<&dyn VcsBackend> = match &source {
+        DiffSource::Vcs(b) => Some(*b),
+        _ => None,
+    };
+
     theme::init(options.theme.as_deref());
     highlight::init();
 
     // Initialize state before TUI so we can sync viewed files
     let mut state = AppState::new(file_diffs, options.focus.as_deref());
     state.settings.wrap = options.wrap;
-    state.set_vcs_name(backend.name());
+    let vcs_name = match &source {
+        DiffSource::Vcs(b) => b.name(),
+        DiffSource::Pr(_) => "github",
+        DiffSource::Disk(_) => "file",
+    };
+    state.set_vcs_name(vcs_name);
 
     // Set diff reference for annotation export context
     let diff_ref_str = if let Some(pr) = &pr_info {
@@ -402,17 +429,16 @@ fn run_app_internal(
         }
 
         if state.needs_reload {
-            let file_diffs = if let Some(ref pr) = pr_info {
-                // In PR mode, reload from GitHub
-                match load_pr_file_diffs(pr) {
+            let file_diffs = match &source {
+                DiffSource::Pr(pr) => match load_pr_file_diffs(pr) {
                     Ok(diffs) => diffs,
                     Err(e) => {
                         eprintln!("Warning: failed to reload PR diffs: {}", e);
                         Vec::new()
                     }
-                }
-            } else {
-                load_file_diffs(&options, backend)
+                },
+                DiffSource::Vcs(b) => load_file_diffs(&options, *b),
+                DiffSource::Disk(paths) => load_view_files(paths),
             };
 
             // Pass changed files to reload so it can unmark them from viewed
@@ -448,7 +474,10 @@ fn run_app_internal(
                 .viewed_hunks
                 .get(&diff.filename)
                 .unwrap_or(&empty_viewed_hunks);
-            let branch_fallback = get_current_branch(backend);
+            let branch_fallback = match &source {
+                DiffSource::Vcs(b) => get_current_branch(*b),
+                _ => String::new(),
+            };
             let commit_ref = state.diff_reference.as_deref().unwrap_or(&branch_fallback);
             let row_offset = std::cell::Cell::new(0usize);
             let gaps_cell = std::cell::RefCell::new(Vec::new());
@@ -962,9 +991,11 @@ fn run_app_internal(
                                 // Left arrow click (first 4 columns to cover " < ")
                                 if mouse.column < 4 && state.current_commit_index > 0 {
                                     let new_index = state.current_commit_index - 1;
-                                    navigate_stacked_commit(
-                                        &mut state, new_index, &options, backend,
-                                    );
+                                    if let Some(b) = backend {
+                                        navigate_stacked_commit(
+                                            &mut state, new_index, &options, b,
+                                        );
+                                    }
                                 }
                                 // Right arrow click (last 4 columns to cover " > ")
                                 else if mouse.column >= term_size.width.saturating_sub(4)
@@ -972,9 +1003,11 @@ fn run_app_internal(
                                         < state.stacked_commits.len().saturating_sub(1)
                                 {
                                     let new_index = state.current_commit_index + 1;
-                                    navigate_stacked_commit(
-                                        &mut state, new_index, &options, backend,
-                                    );
+                                    if let Some(b) = backend {
+                                        navigate_stacked_commit(
+                                            &mut state, new_index, &options, b,
+                                        );
+                                    }
                                 }
                             } else if state.show_sidebar
                                 && mouse.column < sidebar_width
@@ -1343,14 +1376,18 @@ fn run_app_internal(
                                 && state.current_commit_index < state.stacked_commits.len() - 1
                             {
                                 let new_index = state.current_commit_index + 1;
-                                navigate_stacked_commit(&mut state, new_index, &options, backend);
+                                if let Some(b) = backend {
+                                    navigate_stacked_commit(&mut state, new_index, &options, b);
+                                }
                             }
                         }
                         // Stacked mode: navigate to previous commit
                         KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if state.stacked_mode && state.current_commit_index > 0 {
                                 let new_index = state.current_commit_index - 1;
-                                navigate_stacked_commit(&mut state, new_index, &options, backend);
+                                if let Some(b) = backend {
+                                    navigate_stacked_commit(&mut state, new_index, &options, b);
+                                }
                             }
                         }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {

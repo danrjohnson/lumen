@@ -410,5 +410,5 @@ pub fn run_diff_ui(options: DiffOptions, backend: &dyn VcsBackend) -> io::Result
         }
     }
 
-    app::run_app(options, None, backend)
+    app::run_app(options, backend)
 }
