@@ -26,6 +26,7 @@ pub enum FileStatus {
     Added,
     Modified,
     Deleted,
+    View,
 }
 
 impl FileStatus {
@@ -34,6 +35,7 @@ impl FileStatus {
             FileStatus::Added => "A",
             FileStatus::Modified => "M",
             FileStatus::Deleted => "D",
+            FileStatus::View => " ",
         }
     }
 }
@@ -47,6 +49,16 @@ pub struct FileDiff {
 }
 
 /// Detect if content is binary by checking for null bytes in the first 8KB
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_status_has_neutral_symbol() {
+        assert_eq!(FileStatus::View.symbol(), " ");
+    }
+}
+
 pub fn is_binary_content(content: &str) -> bool {
     content.bytes().take(8192).any(|b| b == 0)
 }
