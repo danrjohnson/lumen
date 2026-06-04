@@ -7,7 +7,7 @@ use error::LumenError;
 use git_entity::{commit::Commit, diff::Diff, GitEntity};
 use std::io::Read;
 use std::process;
-use vcs::VcsBackendType;
+use vcs::{VcsBackend, VcsBackendType};
 
 mod ai_prompt;
 mod command;
@@ -37,10 +37,15 @@ async fn run() -> Result<(), LumenError> {
     let provider = provider::LumenProvider::new(config.provider, config.api_key, config.model)?;
     let command = command::LumenCommand::new(provider);
 
-    // Get VCS backend based on CLI override or auto-detection
-    let cwd = std::env::current_dir()?;
+    // Resolve the VCS override before the match (so the closure can capture it
+    // without fighting the partial move of cli.command).
     let vcs_override = cli.vcs.map(VcsBackendType::from);
-    let backend = vcs::get_backend(&cwd, vcs_override)?;
+
+    // Lazy backend: only resolved by commands that actually need it.
+    let resolve_backend = || -> Result<Box<dyn VcsBackend>, LumenError> {
+        let cwd = std::env::current_dir()?;
+        Ok(vcs::get_backend(&cwd, vcs_override)?)
+    };
 
     match cli.command {
         Commands::Explain {
@@ -49,6 +54,7 @@ async fn run() -> Result<(), LumenError> {
             query,
             list,
         } => {
+            let backend = resolve_backend()?;
             let git_entity = if list {
                 let sha = LumenCommand::get_sha_from_fzf(backend.as_ref())?;
                 let info = backend.get_commit(&sha)?;
@@ -98,6 +104,7 @@ async fn run() -> Result<(), LumenError> {
                 .await?;
         }
         Commands::List => {
+            let backend = resolve_backend()?;
             eprintln!("Warning: 'lumen list' is deprecated. Use 'lumen explain --list' instead.");
             command
                 .execute(command::CommandType::List {
@@ -106,6 +113,7 @@ async fn run() -> Result<(), LumenError> {
                 .await?
         }
         Commands::Draft { context } => {
+            let backend = resolve_backend()?;
             // Draft always uses staged diff (git convention)
             let diff = backend.get_working_tree_diff(true)?;
             let git_entity = GitEntity::Diff(Diff::from_working_tree_diff(diff, true)?);
@@ -133,6 +141,7 @@ async fn run() -> Result<(), LumenError> {
             origin,
             wrap,
         } => {
+            let backend = resolve_backend()?;
             let options = command::diff::DiffOptions {
                 reference,
                 pr,
@@ -149,8 +158,20 @@ async fn run() -> Result<(), LumenError> {
         Commands::Configure => {
             command::configure::ConfigureCommand::execute()?;
         }
-        Commands::View { .. } => {
-            unimplemented!("view command wired up in a later task");
+        Commands::View {
+            files,
+            watch,
+            theme,
+            wrap,
+            focus,
+        } => {
+            command::diff::run_view_ui(
+                files,
+                watch,
+                theme.or(config.theme.clone()),
+                wrap || config.wrap.unwrap_or(false),
+                focus,
+            )?;
         }
     }
 

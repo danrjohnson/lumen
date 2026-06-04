@@ -317,6 +317,29 @@ fn unmark_file_as_viewed_sync(node_id: &str, file_path: &str) -> Result<(), Stri
     Ok(())
 }
 
+pub fn run_view_ui(
+    files: Vec<String>,
+    watch: bool,
+    theme: Option<String>,
+    wrap: bool,
+    focus: Option<String>,
+) -> io::Result<()> {
+    use std::path::PathBuf;
+    let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+    let options = DiffOptions {
+        reference: None,
+        pr: None,
+        file: None,
+        watch,
+        theme,
+        stacked: false,
+        focus,
+        origin: None,
+        wrap,
+    };
+    app::run_app_view(options, paths)
+}
+
 pub fn run_diff_ui(options: DiffOptions, backend: &dyn VcsBackend) -> io::Result<()> {
     // Handle PR mode
     if let Some(ref pr_input) = options.pr {
