@@ -333,7 +333,7 @@ pub fn run_diff_ui(options: DiffOptions, backend: &dyn VcsBackend) -> io::Result
         match fetch_pr_info(pr_input, options.origin.as_deref()) {
             Ok(pr_info) => {
                 spinner.success("Fetched PR metadata");
-                return app::run_app_with_pr(options, pr_info, backend);
+                return app::run_app_with_pr(options, pr_info);
             }
             Err(e) => {
                 spinner.fail(&e);
@@ -358,7 +358,7 @@ pub fn run_diff_ui(options: DiffOptions, backend: &dyn VcsBackend) -> io::Result
             match fetch_pr_info(input, options.origin.as_deref()) {
                 Ok(pr_info) => {
                     spinner.success("Fetched PR metadata");
-                    return app::run_app_with_pr(options, pr_info, backend);
+                    return app::run_app_with_pr(options, pr_info);
                 }
                 Err(e) => {
                     spinner.fail(&e);
