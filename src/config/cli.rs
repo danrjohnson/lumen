@@ -154,7 +154,7 @@ pub enum Commands {
         #[arg(required = true)]
         files: Vec<String>,
 
-        /// Watch for file changes and auto-reload
+        /// Watch for file changes and auto-reload (detects changes under the current directory)
         #[arg(short, long)]
         watch: bool,
 
