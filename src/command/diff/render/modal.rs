@@ -280,14 +280,32 @@ impl Modal {
             }
             ModalContent::PushReview { summary, phase, .. } => {
                 let width = 80.min(area.width.saturating_sub(4));
+                // inner_w is the text width available inside the borders (1 border each side).
+                let inner_w = (width.saturating_sub(2)).max(1) as usize;
                 // Height varies by phase: Choosing needs ~4 lines, Body adds an input line.
                 let base_lines = match phase {
                     PushReviewPhase::Choosing => summary.lines().count() as u16 + 3,
-                    PushReviewPhase::Body { .. } => summary.lines().count() as u16 + 5,
+                    // Body can wrap once, so add 1 extra row to avoid clipping.
+                    // TODO: horizontal scroll for long bodies
+                    PushReviewPhase::Body { .. } => summary.lines().count() as u16 + 6,
                     PushReviewPhase::Pushing => 3,
-                    PushReviewPhase::Done(_) | PushReviewPhase::Error(_) => 4,
+                    PushReviewPhase::Done(url) => {
+                        // 1 label row + wrapped url rows + blank + footer + 2 borders
+                        let url_rows = url.chars().count().div_ceil(inner_w);
+                        (1 + url_rows + 4) as u16
+                    }
+                    PushReviewPhase::Error(msg) => {
+                        // 1 label row + wrapped msg rows (accounting for explicit newlines) + blank + footer + 2 borders
+                        let msg_rows: usize = msg
+                            .lines()
+                            .map(|l| l.chars().count().div_ceil(inner_w).max(1))
+                            .sum();
+                        (1 + msg_rows + 4) as u16
+                    }
                 };
-                let height = (base_lines + 2).min(area.height * 80 / 100).max(6);
+                let height = (base_lines + 2)
+                    .min(area.height.saturating_sub(2))
+                    .max(6);
                 (width, height)
             }
             // Handled above with its own near-fullscreen layout.
@@ -959,7 +977,7 @@ impl Modal {
 
         let (mut lines, footer): (Vec<Line>, String) = match phase {
             PushReviewPhase::Choosing => (
-                vec![Line::from(Span::styled(summary.to_string(), Style::default().fg(t.ui.text_primary))), Line::from("")],
+                vec![Line::from(Span::styled(summary, Style::default().fg(t.ui.text_primary))), Line::from("")],
                 "[d] save as draft   [c] submit as comment   [esc] cancel".to_string(),
             ),
             PushReviewPhase::Body { event, input } => {
@@ -969,11 +987,12 @@ impl Modal {
                 };
                 (
                     vec![
-                        Line::from(Span::styled(summary.to_string(), Style::default().fg(t.ui.text_primary))),
+                        Line::from(Span::styled(summary, Style::default().fg(t.ui.text_primary))),
                         Line::from(""),
+                        // TODO: horizontal scroll for long bodies
                         Line::from(vec![
                             Span::styled("Review body (optional): ", Style::default().fg(t.ui.text_muted)),
-                            Span::styled(input.clone(), Style::default().fg(t.ui.text_primary)),
+                            Span::styled(input.as_str(), Style::default().fg(t.ui.text_primary)),
                             Span::styled("_", Style::default().fg(t.ui.text_muted)),
                         ]),
                     ],
@@ -986,14 +1005,14 @@ impl Modal {
             PushReviewPhase::Done(url) => (
                 vec![
                     Line::from(Span::styled("Review pushed.", Style::default().fg(t.ui.status_added))),
-                    Line::from(Span::styled(url.clone(), Style::default().fg(t.ui.text_primary))),
+                    Line::from(Span::styled(url.as_str(), Style::default().fg(t.ui.text_primary))),
                 ],
                 "[any key] close".to_string(),
             ),
             PushReviewPhase::Error(msg) => (
                 vec![
                     Line::from(Span::styled("Push failed:", Style::default().fg(t.ui.status_deleted).bold())),
-                    Line::from(Span::styled(msg.clone(), Style::default().fg(t.ui.status_deleted))),
+                    Line::from(Span::styled(msg.as_str(), Style::default().fg(t.ui.status_deleted))),
                 ],
                 "[any key] close".to_string(),
             ),
@@ -1013,7 +1032,10 @@ impl Modal {
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        frame.render_widget(Paragraph::new(lines), inner);
+        frame.render_widget(
+            Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+            inner,
+        );
     }
 
     /// Handle mouse scroll for the modal.
