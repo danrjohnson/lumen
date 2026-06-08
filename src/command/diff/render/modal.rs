@@ -69,6 +69,8 @@ pub enum ModalContent {
         export_input: Option<String>,
         /// Error message to display (e.g., for failed export)
         error_message: Option<String>,
+        /// Whether to show/enable the push-to-PR action (only true in PR mode).
+        push_available: bool,
     },
     /// Telescope-style fuzzy search across all files, with a preview pane.
     GlobalSearch {
@@ -120,6 +122,8 @@ pub enum ModalResult {
     AnnotationEdit { annotation_id: u64 },
     AnnotationDelete { annotation_id: u64 },
     AnnotationCopyAll,
+    /// User asked to push annotations to the PR from the annotations list.
+    AnnotationPushToPr,
     AnnotationExport(String),
     /// User chose to push the review with the given event and body.
     PushReviewSubmit { event: ReviewEvent, body: String },
@@ -198,6 +202,7 @@ impl Modal {
         title: impl Into<String>,
         items: Vec<String>,
         annotations: Vec<Annotation>,
+        push_available: bool,
     ) -> Self {
         Self {
             content: ModalContent::Annotations {
@@ -207,6 +212,7 @@ impl Modal {
                 selected: 0,
                 export_input: None,
                 error_message: None,
+                push_available,
             },
         }
     }
@@ -358,9 +364,10 @@ impl Modal {
                 selected,
                 export_input,
                 error_message,
+                push_available,
                 ..
             } => {
-                self.render_annotations(frame, modal_area, title, items, *selected, export_input.as_deref(), error_message.as_deref());
+                self.render_annotations(frame, modal_area, title, items, *selected, export_input.as_deref(), error_message.as_deref(), *push_available);
             }
             ModalContent::PushReview { title, summary, phase } => {
                 self.render_push_review(frame, modal_area, title, summary, phase);
@@ -749,6 +756,7 @@ impl Modal {
         selected: usize,
         export_input: Option<&str>,
         error_message: Option<&str>,
+        push_available: bool,
     ) {
         let t = theme::get();
 
@@ -944,7 +952,7 @@ impl Modal {
                 Span::styled(" cancel", Style::default().fg(t.ui.text_muted)),
             ])
         } else {
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled("enter", Style::default().fg(t.ui.text_muted)),
                 Span::styled(" jump  ", Style::default().fg(t.ui.text_muted)),
                 Span::styled("│  ", Style::default().fg(t.ui.border_unfocused)),
@@ -959,7 +967,13 @@ impl Modal {
                 Span::styled("│  ", Style::default().fg(t.ui.border_unfocused)),
                 Span::styled("o", Style::default().fg(t.ui.text_muted)),
                 Span::styled(" export", Style::default().fg(t.ui.text_muted)),
-            ])
+            ];
+            if push_available {
+                spans.push(Span::styled("  │  ", Style::default().fg(t.ui.border_unfocused)));
+                spans.push(Span::styled("P", Style::default().fg(t.ui.text_muted)));
+                spans.push(Span::styled(" push", Style::default().fg(t.ui.text_muted)));
+            }
+            Line::from(spans)
         };
         let footer = Paragraph::new(footer_text).alignment(ratatui::prelude::Alignment::Center);
         frame.render_widget(footer, footer_area);
@@ -1328,6 +1342,7 @@ impl Modal {
                 selected,
                 export_input,
                 error_message,
+                push_available,
                 ..
             } => {
                 // Export input mode
@@ -1421,6 +1436,9 @@ impl Modal {
                             }
                         }),
                         KeyCode::Char('y') => Some(ModalResult::AnnotationCopyAll),
+                        KeyCode::Char('P') if *push_available => {
+                            Some(ModalResult::AnnotationPushToPr)
+                        }
                         KeyCode::Char('o') => {
                             *export_input = Some(String::from("annotations.txt"));
                             None
@@ -2201,5 +2219,35 @@ mod push_review_tests {
         let result = modal.handle_input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 40);
         // Returning to Choosing yields no ModalResult (modal stays open).
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn annotations_modal_p_pushes_only_when_available() {
+        use crate::command::diff::state::{Annotation, AnnotationTarget};
+        use std::time::UNIX_EPOCH;
+        let anns = vec![Annotation {
+            id: 1,
+            filename: "a.rs".to_string(),
+            target: AnnotationTarget::File,
+            content: "note".to_string(),
+            created_at: UNIX_EPOCH,
+        }];
+        let items = vec!["a.rs — note".to_string()];
+
+        // push_available = true => 'P' yields AnnotationPushToPr
+        let mut modal = Modal::annotations("Annotations", items.clone(), anns.clone(), true);
+        let r = modal.handle_input(
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE),
+            40,
+        );
+        assert!(matches!(r, Some(ModalResult::AnnotationPushToPr)));
+
+        // push_available = false => 'P' is a no-op (None)
+        let mut modal2 = Modal::annotations("Annotations", items, anns, false);
+        let r2 = modal2.handle_input(
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE),
+            40,
+        );
+        assert!(r2.is_none());
     }
 }
