@@ -342,7 +342,7 @@ fn push_review(pr_info: &PrInfo, payload: &ReviewPayload) -> Result<String, Stri
     );
 
     let mut child = Command::new("gh")
-        .args(["api", "--method", "POST", &endpoint, "--input", "-", "--jq", ".html_url"])
+        .args(["api", "--method", "POST", &endpoint, "--input", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -364,18 +364,47 @@ fn push_review(pr_info: &PrInfo, payload: &ReviewPayload) -> Result<String, Stri
         .map_err(|e| format!("Failed to wait for gh: {}", e))?;
 
     if !output.status.success() {
+        // gh prints "gh: <message> (HTTP NNN)" to stderr, but GitHub's detailed
+        // validation errors (which comment/field was rejected) live in the JSON
+        // response body on stdout. Surface both so 422s are diagnosable.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut msg = stderr.trim().to_string();
+        let body = stdout.trim();
+        if !body.is_empty() {
+            if !msg.is_empty() {
+                msg.push('\n');
+            }
+            msg.push_str(body);
+        }
+        return Err(msg);
     }
 
-    // With `--jq .html_url`, gh prints just the review's URL (or "null" if absent).
+    // The created review's URL is the html_url containing the review anchor;
+    // a naive first-match would grab the reviewer's profile html_url instead.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let url = stdout.trim();
-    if url.is_empty() || url == "null" {
-        Ok(format!("PR #{}", pr_info.number))
+    if let Some(url) = extract_review_url(&stdout) {
+        Ok(url)
     } else {
-        Ok(url.to_string())
+        Ok(format!("PR #{}", pr_info.number))
     }
+}
+
+/// Extract the created review's URL from a "create review" JSON response.
+///
+/// The response contains several `html_url` values (e.g. the reviewer's profile
+/// under `user`); the review's own URL is the one carrying the
+/// `#pullrequestreview-` anchor. Returns the first such match.
+fn extract_review_url(json: &str) -> Option<String> {
+    for part in json.split("\"html_url\":\"").skip(1) {
+        if let Some(end) = part.find('"') {
+            let url = &part[..end];
+            if url.contains("#pullrequestreview-") {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Push a review on a background thread, sending the outcome over `tx`.
