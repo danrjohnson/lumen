@@ -39,13 +39,13 @@ fn open_tui_writer() -> io::Result<Box<dyn Write + Send>> {
 use super::annotation::{AnnotationEditor, AnnotationEditorResult};
 use super::coordinates::{extract_selected_text, PanelLayout};
 use super::git::{
-    get_current_branch, load_file_diffs, load_pr_file_diffs, load_single_commit_diffs,
-    load_view_files,
+    fetch_pr_diff, get_current_branch, load_file_diffs, load_pr_file_diffs,
+    load_single_commit_diffs, load_view_files,
 };
 use super::highlight;
 use super::render::{
     render_diff, render_empty_state, truncate_path, FilePickerItem, KeyBind, KeyBindSection, Modal,
-    ModalContent, ModalFileStatus, ModalResult,
+    ModalContent, ModalFileStatus, ModalResult, PushReviewPhase,
 };
 use super::state::{adjust_scroll_for_hunk, adjust_scroll_to_line, AppState, PendingKey};
 use super::theme;
@@ -55,7 +55,8 @@ use super::types::{
 };
 use super::watcher::{setup_watcher, WatchEvent};
 use super::{
-    fetch_viewed_files, mark_file_as_viewed_async, unmark_file_as_viewed_async, DiffOptions, PrInfo,
+    build_review, fetch_viewed_files, mark_file_as_viewed_async, parse_hunk_map,
+    push_review_async, unmark_file_as_viewed_async, DiffOptions, PrInfo, PushResult, ReviewEvent,
 };
 use spinoff::{spinners, Color, Spinner};
 
@@ -259,6 +260,40 @@ fn format_annotation_preview(annotation: &super::state::Annotation) -> String {
     }
 }
 
+/// Build the pre-flight summary line for the push-review modal by classifying
+/// the current annotations against the PR's diff.
+fn push_review_summary(state: &AppState, pr_info: Option<&PrInfo>) -> String {
+    let Some(pr) = pr_info else {
+        return "Not in PR mode".to_string();
+    };
+    let hunk_map = match fetch_pr_diff(pr) {
+        Ok(diff) => parse_hunk_map(&diff),
+        Err(_) => std::collections::HashMap::new(),
+    };
+    let payload = build_review(
+        &state.annotations,
+        &hunk_map,
+        state.diff_reference.as_deref(),
+        "",
+        ReviewEvent::Draft,
+    );
+    let inline = payload
+        .comments
+        .iter()
+        .filter(|c| c.subject_type.is_none())
+        .count();
+    let file_level = payload
+        .comments
+        .iter()
+        .filter(|c| c.subject_type.is_some())
+        .count();
+    let rolled = if payload.body.trim().is_empty() { 0 } else { 1 };
+    format!(
+        "{} inline comment(s), {} file-level, {} rolled into review body",
+        inline, file_level, rolled
+    )
+}
+
 pub fn run_app_with_pr(
     options: DiffOptions,
     pr_info: PrInfo,
@@ -399,6 +434,7 @@ fn run_app_internal(
     let mut pending_watch_event: Option<WatchEvent> = None;
     let mut pending_events: VecDeque<Event> = VecDeque::new();
     let mut send_annotations_on_exit = false;
+    let (push_tx, push_rx) = std::sync::mpsc::channel::<PushResult>();
 
     'main: loop {
         if let Some(ref rx) = watch_rx {
@@ -410,6 +446,22 @@ fn run_app_internal(
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
             }
+        }
+
+        // Drain any completed PR-review push and update the modal.
+        match push_rx.try_recv() {
+            Ok(result) => {
+                if let Some(ref mut modal) = active_modal {
+                    if let ModalContent::PushReview { phase, .. } = &mut modal.content {
+                        *phase = match result {
+                            PushResult::Ok(url) => PushReviewPhase::Done(url),
+                            PushResult::Err(msg) => PushReviewPhase::Error(msg),
+                        };
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
 
         if state.needs_reload {
@@ -870,9 +922,28 @@ fn run_app_internal(
                                     state.scroll = (sbs_line_index as u16).min(max_scroll);
                                     active_modal = None;
                                 }
-                                ModalResult::PushReviewSubmit { .. } => {
-                                    // TODO(Task 7): wire up actual review submission.
-                                    active_modal = None;
+                                ModalResult::PushReviewSubmit { event, body } => {
+                                    if let Some(ref pr) = pr_info {
+                                        let hunk_map = match fetch_pr_diff(pr) {
+                                            Ok(diff) => parse_hunk_map(&diff),
+                                            Err(_) => std::collections::HashMap::new(),
+                                        };
+                                        let payload = build_review(
+                                            &state.annotations,
+                                            &hunk_map,
+                                            state.diff_reference.as_deref(),
+                                            &body,
+                                            event,
+                                        );
+                                        if let Some(ref mut modal) = active_modal {
+                                            if let ModalContent::PushReview { phase, .. } =
+                                                &mut modal.content
+                                            {
+                                                *phase = PushReviewPhase::Pushing;
+                                            }
+                                        }
+                                        push_review_async(pr, payload, push_tx.clone());
+                                    }
                                 }
                                 ModalResult::Dismissed | ModalResult::Selected(_, _) => {
                                     active_modal = None;
@@ -1913,6 +1984,16 @@ fn run_app_internal(
                                 active_modal = Some(Modal::confirm("Send annotations", msg));
                             }
                         }
+                        KeyCode::Char('P') => {
+                            if pr_info.is_some()
+                                && !state.stacked_mode
+                                && !state.annotations.is_empty()
+                            {
+                                let summary = push_review_summary(&state, pr_info.as_ref());
+                                active_modal =
+                                    Some(Modal::push_review("Push annotations to PR", summary));
+                            }
+                        }
                         KeyCode::Char('y') => {
                             if !state.file_diffs.is_empty() {
                                 // If selection is active, copy selected text
@@ -2226,6 +2307,10 @@ fn run_app_internal(
                                             KeyBind {
                                                 key: "s",
                                                 description: "Exit & send annotations to stdout",
+                                            },
+                                            KeyBind {
+                                                key: "P",
+                                                description: "Push annotations to PR (PR mode)",
                                             },
                                         ],
                                     },
