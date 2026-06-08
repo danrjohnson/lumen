@@ -47,6 +47,10 @@ pub struct ReviewComment {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ReviewPayload {
+    /// Top-level review body. Omitted entirely when empty: GitHub rejects a
+    /// submitted (`event: COMMENT`) review that carries an empty-string body,
+    /// whereas omitting it matches how the web UI submits comment-only reviews.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub body: String,
     #[serde(serialize_with = "serialize_event", skip_serializing_if = "event_is_draft")]
     pub event: ReviewEvent,
@@ -479,6 +483,9 @@ diff --git a/c.rs b/c.rs
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["event"], "COMMENT");
+        // An empty body must be omitted, not sent as "": GitHub 422s a
+        // submitted COMMENT review that carries an empty-string body.
+        assert!(json.get("body").is_none());
     }
 
     #[test]
