@@ -22,13 +22,10 @@ pub fn parse_hunk_map(diff: &str) -> HunkMap {
 
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            // "a/path b/path" -> take the b/ path
-            let path = rest
-                .split_whitespace()
-                .nth(1)
-                .map(|p| p.strip_prefix("b/").unwrap_or(p).to_string());
-            current = path.clone();
-            if let Some(ref p) = path {
+            // "a/path b/path" -> take the b/ path (rfind handles spaces in paths)
+            let path = rest.rfind(" b/").map(|i| rest[i + 3..].to_string());
+            current = path;
+            if let Some(ref p) = current {
                 map.entry(p.clone()).or_default();
             }
             continue;
@@ -36,9 +33,14 @@ pub fn parse_hunk_map(diff: &str) -> HunkMap {
 
         // Hunk header: @@ -oldStart,oldCount +newStart,newCount @@
         if line.starts_with("@@") {
-            if let Some((os, ns)) = parse_hunk_header(line) {
-                old_line = os;
-                new_line = ns;
+            match parse_hunk_header(line) {
+                Some((os, ns)) => {
+                    old_line = os;
+                    new_line = ns;
+                }
+                None => {
+                    current = None;
+                }
             }
             continue;
         }
@@ -111,5 +113,47 @@ index 1111111..2222222 100644
         assert_eq!(hunks.right, HashSet::from([10, 11, 12, 13]));
         // Old side (LEFT): context_a=10, removed_old_11=11, context_b=12
         assert_eq!(hunks.left, HashSet::from([10, 11, 12]));
+    }
+
+    #[test]
+    fn parse_hunk_map_handles_multiple_files() {
+        let diff = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,2 @@
+-old_a
++new_a
+ ctx_a
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -5,1 +5,2 @@
+ ctx_b
++added_b
+";
+        let map = parse_hunk_map(diff);
+        let a = map.get("a.rs").expect("a.rs present");
+        assert_eq!(a.right, HashSet::from([1, 2]));
+        assert_eq!(a.left, HashSet::from([1, 2]));
+        let b = map.get("b.rs").expect("b.rs present");
+        assert_eq!(b.right, HashSet::from([5, 6]));
+        assert_eq!(b.left, HashSet::from([5]));
+    }
+
+    #[test]
+    fn parse_hunk_map_handles_hunk_header_without_counts() {
+        let diff = "\
+diff --git a/c.rs b/c.rs
+--- a/c.rs
++++ b/c.rs
+@@ -5 +5 @@
+-old_c
++new_c
+";
+        let map = parse_hunk_map(diff);
+        let c = map.get("c.rs").expect("c.rs present");
+        assert_eq!(c.right, HashSet::from([5]));
+        assert_eq!(c.left, HashSet::from([5]));
     }
 }
