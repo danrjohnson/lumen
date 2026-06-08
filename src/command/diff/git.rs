@@ -157,10 +157,9 @@ pub fn load_file_diffs(options: &DiffOptions, backend: &dyn VcsBackend) -> Vec<F
         .collect()
 }
 
-pub fn load_pr_file_diffs(pr_info: &PrInfo) -> Result<Vec<FileDiff>, String> {
+/// Fetch the PR's unified diff via `gh pr diff`.
+pub fn fetch_pr_diff(pr_info: &PrInfo) -> Result<String, String> {
     let repo_arg = format!("{}/{}", pr_info.repo_owner, pr_info.repo_name);
-
-    // Get PR diff to find changed files
     let output = Command::new("gh")
         .args([
             "pr",
@@ -177,7 +176,11 @@ pub fn load_pr_file_diffs(pr_info: &PrInfo) -> Result<Vec<FileDiff>, String> {
         return Err(format!("gh pr diff failed: {}", stderr.trim()));
     }
 
-    let diff_output = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn load_pr_file_diffs(pr_info: &PrInfo) -> Result<Vec<FileDiff>, String> {
+    let diff_output = fetch_pr_diff(pr_info)?;
     let changed_files = parse_changed_files_from_diff(&diff_output);
 
     // Fetch full file contents for each changed file
