@@ -884,6 +884,10 @@ fn run_app_internal(
                                     state.scroll = (sbs_line_index as u16).min(max_scroll);
                                     active_modal = None;
                                 }
+                                ModalResult::PushReviewSubmit { .. } => {
+                                    // TODO(Task 7): wire up actual review submission.
+                                    active_modal = None;
+                                }
                                 ModalResult::Dismissed | ModalResult::Selected(_, _) => {
                                     active_modal = None;
                                 }

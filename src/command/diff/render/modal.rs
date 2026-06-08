@@ -9,6 +9,7 @@ use crate::command::diff::render::diff_view::expand_tabs_in_spans;
 use crate::command::diff::search::MatchPanel;
 use crate::command::diff::state::Annotation;
 use crate::command::diff::theme;
+use crate::command::diff::ReviewEvent;
 
 #[derive(Clone)]
 pub struct KeyBind {
@@ -74,6 +75,27 @@ pub enum ModalContent {
         title: String,
         state: Box<GlobalSearchState>,
     },
+    /// Modal for pushing annotations to a GitHub PR as a review.
+    PushReview {
+        title: String,
+        /// Pre-flight summary, e.g. "3 inline, 1 file, 2 rolled into body".
+        summary: String,
+        phase: PushReviewPhase,
+    },
+}
+
+#[derive(Clone)]
+pub enum PushReviewPhase {
+    /// Choosing draft vs comment vs cancel.
+    Choosing,
+    /// Editing the optional top-level review body; `event` is locked in.
+    Body { event: ReviewEvent, input: String },
+    /// Submission in flight.
+    Pushing,
+    /// Submission succeeded; holds the review URL.
+    Done(String),
+    /// Submission failed; holds the error message.
+    Error(String),
 }
 
 pub struct Modal {
@@ -99,6 +121,8 @@ pub enum ModalResult {
     AnnotationDelete { annotation_id: u64 },
     AnnotationCopyAll,
     AnnotationExport(String),
+    /// User chose to push the review with the given event and body.
+    PushReviewSubmit { event: ReviewEvent, body: String },
 }
 
 impl Modal {
@@ -187,6 +211,16 @@ impl Modal {
         }
     }
 
+    pub fn push_review(title: impl Into<String>, summary: String) -> Self {
+        Self {
+            content: ModalContent::PushReview {
+                title: title.into(),
+                summary,
+                phase: PushReviewPhase::Choosing,
+            },
+        }
+    }
+
     pub fn render(&self, frame: &mut Frame) {
         let area = frame.area();
 
@@ -244,6 +278,18 @@ impl Modal {
                 let height = (items_count + extra + 2).min(area.height * 80 / 100).max(8);
                 (width, height)
             }
+            ModalContent::PushReview { summary, phase, .. } => {
+                let width = 80.min(area.width.saturating_sub(4));
+                // Height varies by phase: Choosing needs ~4 lines, Body adds an input line.
+                let base_lines = match phase {
+                    PushReviewPhase::Choosing => summary.lines().count() as u16 + 3,
+                    PushReviewPhase::Body { .. } => summary.lines().count() as u16 + 5,
+                    PushReviewPhase::Pushing => 3,
+                    PushReviewPhase::Done(_) | PushReviewPhase::Error(_) => 4,
+                };
+                let height = (base_lines + 2).min(area.height * 80 / 100).max(6);
+                (width, height)
+            }
             // Handled above with its own near-fullscreen layout.
             ModalContent::GlobalSearch { .. } => unreachable!(),
         };
@@ -297,6 +343,9 @@ impl Modal {
                 ..
             } => {
                 self.render_annotations(frame, modal_area, title, items, *selected, export_input.as_deref(), error_message.as_deref());
+            }
+            ModalContent::PushReview { title, summary, phase } => {
+                self.render_push_review(frame, modal_area, title, summary, phase);
             }
             ModalContent::GlobalSearch { .. } => unreachable!(),
         }
@@ -898,6 +947,75 @@ impl Modal {
         frame.render_widget(footer, footer_area);
     }
 
+    fn render_push_review(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        summary: &str,
+        phase: &PushReviewPhase,
+    ) {
+        let t = theme::get();
+
+        let (mut lines, footer): (Vec<Line>, String) = match phase {
+            PushReviewPhase::Choosing => (
+                vec![Line::from(Span::styled(summary.to_string(), Style::default().fg(t.ui.text_primary))), Line::from("")],
+                "[d] save as draft   [c] submit as comment   [esc] cancel".to_string(),
+            ),
+            PushReviewPhase::Body { event, input } => {
+                let label = match event {
+                    ReviewEvent::Draft => "draft",
+                    ReviewEvent::Comment => "comment",
+                };
+                (
+                    vec![
+                        Line::from(Span::styled(summary.to_string(), Style::default().fg(t.ui.text_primary))),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled("Review body (optional): ", Style::default().fg(t.ui.text_muted)),
+                            Span::styled(input.clone(), Style::default().fg(t.ui.text_primary)),
+                            Span::styled("_", Style::default().fg(t.ui.text_muted)),
+                        ]),
+                    ],
+                    format!("[enter] push as {}   [esc] back", label),
+                )
+            }
+            PushReviewPhase::Pushing => {
+                (vec![Line::from(Span::styled("Pushing review to GitHub\u{2026}", Style::default().fg(t.ui.text_muted).italic()))], String::new())
+            }
+            PushReviewPhase::Done(url) => (
+                vec![
+                    Line::from(Span::styled("Review pushed.", Style::default().fg(t.ui.status_added))),
+                    Line::from(Span::styled(url.clone(), Style::default().fg(t.ui.text_primary))),
+                ],
+                "[any key] close".to_string(),
+            ),
+            PushReviewPhase::Error(msg) => (
+                vec![
+                    Line::from(Span::styled("Push failed:", Style::default().fg(t.ui.status_deleted).bold())),
+                    Line::from(Span::styled(msg.clone(), Style::default().fg(t.ui.status_deleted))),
+                ],
+                "[any key] close".to_string(),
+            ),
+        };
+
+        if !footer.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(footer, Style::default().fg(t.ui.text_muted))));
+        }
+
+        let block = Block::default()
+            .title(format!(" {} ", title))
+            .title_style(Style::default().fg(t.ui.border_focused).bold())
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(t.ui.border_unfocused));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     /// Handle mouse scroll for the modal.
     /// Returns true if the scroll was handled.
     pub fn handle_mouse(
@@ -1020,13 +1138,14 @@ impl Modal {
     /// Handle keyboard input for the modal.
     /// Returns Some(ModalResult) if the modal should close.
     pub fn handle_input(&mut self, key: KeyEvent, terminal_height: u16) -> Option<ModalResult> {
-        // FilePicker, Annotations, and GlobalSearch handle their own dismiss logic
+        // FilePicker, Annotations, GlobalSearch, and PushReview handle their own dismiss logic
         // (they consume printable chars for query input).
         if !matches!(
             self.content,
             ModalContent::FilePicker { .. }
                 | ModalContent::Annotations { .. }
                 | ModalContent::GlobalSearch { .. }
+                | ModalContent::PushReview { .. }
         ) {
             // Close on Esc, q, or Ctrl+C
             if key.code == KeyCode::Esc
@@ -1288,6 +1407,64 @@ impl Modal {
                     }
                 }
             }
+            ModalContent::PushReview { phase, .. } => match phase {
+                PushReviewPhase::Choosing => match key.code {
+                    KeyCode::Char('d') => {
+                        *phase = PushReviewPhase::Body {
+                            event: ReviewEvent::Draft,
+                            input: String::new(),
+                        };
+                        None
+                    }
+                    KeyCode::Char('c')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        *phase = PushReviewPhase::Body {
+                            event: ReviewEvent::Comment,
+                            input: String::new(),
+                        };
+                        None
+                    }
+                    KeyCode::Esc
+                    | KeyCode::Char('q')
+                    | KeyCode::Char('c') => Some(ModalResult::Dismissed),
+                    _ => None,
+                },
+                PushReviewPhase::Body { event, input } => match key.code {
+                    KeyCode::Esc => {
+                        *phase = PushReviewPhase::Choosing;
+                        None
+                    }
+                    KeyCode::Enter => Some(ModalResult::PushReviewSubmit {
+                        event: *event,
+                        body: input.clone(),
+                    }),
+                    KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                        crate::command::diff::text_edit::erase_word_backward(input);
+                        None
+                    }
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        crate::command::diff::text_edit::erase_word_backward(input);
+                        None
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        None
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::ALT)
+                            && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        input.push(c);
+                        None
+                    }
+                    _ => None,
+                },
+                PushReviewPhase::Pushing => None,
+                PushReviewPhase::Done(_) | PushReviewPhase::Error(_) => {
+                    Some(ModalResult::Dismissed)
+                }
+            },
             ModalContent::GlobalSearch { state, .. } => {
                 // List pane occupies the full terminal height minus the
                 // bordered pane chrome (2) and the prompt + separator (2).
@@ -1934,4 +2111,59 @@ fn calculate_keybindings_visible_height(terminal_height: u16, content_height: u1
     let modal_height = (content_height + 4).min(terminal_height * 80 / 100).max(5);
     // Subtract 2 for top/bottom borders
     modal_height.saturating_sub(2)
+}
+
+#[cfg(test)]
+mod push_review_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn choosing_then_body_then_submit_comment() {
+        let mut modal = Modal::push_review("Push to PR #1", "1 inline, 0 file, 0 rolled up".into());
+        // 'c' -> Body phase, event = Comment. No result yet.
+        assert!(modal.handle_input(key('c'), 40).is_none());
+        // Type a body.
+        assert!(modal.handle_input(key('h'), 40).is_none());
+        assert!(modal.handle_input(key('i'), 40).is_none());
+        // Enter -> submit.
+        let result = modal.handle_input(enter(), 40);
+        match result {
+            Some(ModalResult::PushReviewSubmit { event, body }) => {
+                assert_eq!(event, crate::command::diff::ReviewEvent::Comment);
+                assert_eq!(body, "hi");
+            }
+            _ => panic!("expected PushReviewSubmit"),
+        }
+    }
+
+    #[test]
+    fn draft_choice_sets_draft_event() {
+        let mut modal = Modal::push_review("Push to PR #1", "summary".into());
+        modal.handle_input(key('d'), 40);
+        let result = modal.handle_input(enter(), 40);
+        match result {
+            Some(ModalResult::PushReviewSubmit { event, .. }) => {
+                assert_eq!(event, crate::command::diff::ReviewEvent::Draft);
+            }
+            _ => panic!("expected PushReviewSubmit"),
+        }
+    }
+
+    #[test]
+    fn esc_in_body_returns_to_choosing_not_dismissed() {
+        let mut modal = Modal::push_review("Push to PR #1", "summary".into());
+        modal.handle_input(key('c'), 40);
+        let result = modal.handle_input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 40);
+        // Returning to Choosing yields no ModalResult (modal stays open).
+        assert!(result.is_none());
+    }
 }
