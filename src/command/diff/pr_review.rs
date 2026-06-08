@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::Serialize;
+use crate::command::diff::state::{Annotation, AnnotationTarget};
+use crate::command::diff::types::DiffPanelFocus;
 
 /// Whether the created review is left as a draft or submitted as a comment.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,9 +140,239 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
     Some((old_start, new_start))
 }
 
+/// Map a panel to the GitHub review side string.
+fn panel_side(panel: DiffPanelFocus) -> &'static str {
+    match panel {
+        DiffPanelFocus::Old => "LEFT",
+        _ => "RIGHT",
+    }
+}
+
+/// Classify each annotation into an inline comment, file-level comment, or a
+/// body roll-up, producing a complete `ReviewPayload`.
+///
+/// - File-target annotations -> file-level comments (`subject_type: "file"`).
+/// - Line-range annotations fully inside the diff -> inline comments.
+/// - Line-range annotations with any endpoint outside the diff -> rolled up
+///   into the review body (entire range, no clamping).
+pub fn build_review(
+    annotations: &[Annotation],
+    hunk_map: &HunkMap,
+    diff_reference: Option<&str>,
+    user_body: &str,
+    event: ReviewEvent,
+) -> ReviewPayload {
+    let mut comments = Vec::new();
+    let mut rollups = Vec::new();
+
+    for ann in annotations {
+        match &ann.target {
+            AnnotationTarget::File => {
+                comments.push(ReviewComment {
+                    path: ann.filename.clone(),
+                    body: ann.content.clone(),
+                    line: None,
+                    side: None,
+                    start_line: None,
+                    start_side: None,
+                    subject_type: Some("file".to_string()),
+                });
+            }
+            AnnotationTarget::LineRange { panel, start_line, end_line } => {
+                let side = panel_side(*panel);
+                let in_diff = |line: usize| match hunk_map.get(&ann.filename) {
+                    Some(h) if side == "RIGHT" => h.right.contains(&line),
+                    Some(h) => h.left.contains(&line),
+                    None => false,
+                };
+
+                if in_diff(*start_line) && in_diff(*end_line) {
+                    let (start_line_field, start_side_field) = if start_line == end_line {
+                        (None, None)
+                    } else {
+                        (Some(*start_line), Some(side.to_string()))
+                    };
+                    comments.push(ReviewComment {
+                        path: ann.filename.clone(),
+                        body: ann.content.clone(),
+                        line: Some(*end_line),
+                        side: Some(side.to_string()),
+                        start_line: start_line_field,
+                        start_side: start_side_field,
+                        subject_type: None,
+                    });
+                } else {
+                    rollups.push(format_rollup(ann, side));
+                }
+            }
+        }
+    }
+
+    let body = assemble_body(diff_reference, user_body, &rollups);
+    ReviewPayload { body, event, comments }
+}
+
+/// Format one rolled-up annotation as a markdown bullet referencing its location.
+fn format_rollup(ann: &Annotation, side: &str) -> String {
+    let location = match &ann.target {
+        AnnotationTarget::File => ann.filename.clone(),
+        AnnotationTarget::LineRange { start_line, end_line, .. } => {
+            if start_line == end_line {
+                format!("{} line {} ({})", ann.filename, start_line, side)
+            } else {
+                format!("{} lines {}-{} ({})", ann.filename, start_line, end_line, side)
+            }
+        }
+    };
+    format!("- **{}**\n  {}", location, ann.content)
+}
+
+/// Combine the user body, optional diff reference header, and roll-up bullets.
+fn assemble_body(diff_reference: Option<&str>, user_body: &str, rollups: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !user_body.trim().is_empty() {
+        parts.push(user_body.trim().to_string());
+    }
+    if !rollups.is_empty() {
+        let mut section = String::new();
+        if let Some(reference) = diff_reference {
+            section.push_str(&format!("Notes that couldn't be anchored to the diff ({}):\n\n", reference));
+        } else {
+            section.push_str("Notes that couldn't be anchored to the diff:\n\n");
+        }
+        section.push_str(&rollups.join("\n\n"));
+        parts.push(section);
+    }
+    parts.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::diff::state::{Annotation, AnnotationTarget};
+    use crate::command::diff::types::DiffPanelFocus;
+    use std::time::UNIX_EPOCH;
+
+    fn ann(id: u64, filename: &str, target: AnnotationTarget, content: &str) -> Annotation {
+        Annotation {
+            id,
+            filename: filename.to_string(),
+            target,
+            content: content.to_string(),
+            created_at: UNIX_EPOCH,
+        }
+    }
+
+    fn sample_map() -> HunkMap {
+        let mut m = HunkMap::new();
+        m.insert(
+            "src/foo.rs".to_string(),
+            FileHunks {
+                right: HashSet::from([10, 11, 12, 13]),
+                left: HashSet::from([10, 11, 12]),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn build_review_makes_inline_comment_for_in_diff_line() {
+        let map = sample_map();
+        let annotations = vec![ann(
+            1,
+            "src/foo.rs",
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::New, start_line: 11, end_line: 11 },
+            "looks wrong",
+        )];
+        let payload = build_review(&annotations, &map, None, "", ReviewEvent::Draft);
+
+        assert_eq!(payload.comments.len(), 1);
+        let c = &payload.comments[0];
+        assert_eq!(c.path, "src/foo.rs");
+        assert_eq!(c.line, Some(11));
+        assert_eq!(c.side, Some("RIGHT".to_string()));
+        assert_eq!(c.start_line, None);
+        assert_eq!(c.body, "looks wrong");
+        assert_eq!(payload.body, "");
+    }
+
+    #[test]
+    fn build_review_makes_multiline_left_comment() {
+        let map = sample_map();
+        let annotations = vec![ann(
+            1,
+            "src/foo.rs",
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::Old, start_line: 10, end_line: 12 },
+            "old block",
+        )];
+        let payload = build_review(&annotations, &map, None, "", ReviewEvent::Draft);
+
+        let c = &payload.comments[0];
+        assert_eq!(c.side, Some("LEFT".to_string()));
+        assert_eq!(c.start_line, Some(10));
+        assert_eq!(c.start_side, Some("LEFT".to_string()));
+        assert_eq!(c.line, Some(12));
+    }
+
+    #[test]
+    fn build_review_makes_file_level_comment() {
+        let map = sample_map();
+        let annotations = vec![ann(1, "src/foo.rs", AnnotationTarget::File, "whole file note")];
+        let payload = build_review(&annotations, &map, None, "", ReviewEvent::Draft);
+
+        let c = &payload.comments[0];
+        assert_eq!(c.subject_type, Some("file".to_string()));
+        assert_eq!(c.line, None);
+        assert_eq!(c.side, None);
+        assert_eq!(c.body, "whole file note");
+    }
+
+    #[test]
+    fn build_review_rolls_up_out_of_diff_line_into_body() {
+        let map = sample_map();
+        let annotations = vec![ann(
+            1,
+            "src/foo.rs",
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::New, start_line: 99, end_line: 99 },
+            "note on unchanged line",
+        )];
+        let payload = build_review(&annotations, &map, Some("PR #42"), "", ReviewEvent::Draft);
+
+        assert!(payload.comments.is_empty());
+        assert!(payload.body.contains("note on unchanged line"));
+        assert!(payload.body.contains("src/foo.rs"));
+        assert!(payload.body.contains("99"));
+        assert!(payload.body.contains("PR #42"));
+    }
+
+    #[test]
+    fn build_review_partial_multiline_outside_diff_rolls_up_entirely() {
+        let map = sample_map();
+        let annotations = vec![ann(
+            1,
+            "src/foo.rs",
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::New, start_line: 13, end_line: 14 },
+            "spans out of diff",
+        )];
+        let payload = build_review(&annotations, &map, None, "", ReviewEvent::Draft);
+
+        assert!(payload.comments.is_empty());
+        assert!(payload.body.contains("spans out of diff"));
+    }
+
+    #[test]
+    fn build_review_prepends_user_body() {
+        let map = sample_map();
+        let annotations = vec![ann(
+            1,
+            "src/foo.rs",
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::New, start_line: 11, end_line: 11 },
+            "inline",
+        )];
+        let payload = build_review(&annotations, &map, None, "Overall LGTM", ReviewEvent::Comment);
+        assert!(payload.body.starts_with("Overall LGTM"));
+        assert_eq!(payload.event, ReviewEvent::Comment);
+    }
 
     const SAMPLE_DIFF: &str = "\
 diff --git a/src/foo.rs b/src/foo.rs
