@@ -288,6 +288,21 @@ fn push_review_summary(state: &AppState, hunk_map: &HunkMap) -> String {
     )
 }
 
+/// Build the push-review modal and the hunk-map snapshot it should use, or
+/// None when pushing isn't applicable (not a PR, no annotations, stacked mode).
+fn build_push_modal(state: &AppState, pr_info: Option<&PrInfo>) -> Option<(Modal, HunkMap)> {
+    if state.stacked_mode || state.annotations.is_empty() {
+        return None;
+    }
+    let pr = pr_info?;
+    let hunk_map = match fetch_pr_diff(pr) {
+        Ok(diff) => parse_hunk_map(&diff),
+        Err(_) => std::collections::HashMap::new(),
+    };
+    let summary = push_review_summary(state, &hunk_map);
+    Some((Modal::push_review("Push annotations to PR", summary), hunk_map))
+}
+
 pub fn run_app_with_pr(
     options: DiffOptions,
     pr_info: PrInfo,
@@ -861,6 +876,7 @@ fn run_app_internal(
                                             "Annotations",
                                             items,
                                             sorted_annotations,
+                                            pr_info.is_some(),
                                         ));
                                     } else {
                                         active_modal = None;
@@ -873,6 +889,17 @@ fn run_app_internal(
                                         let _ = clipboard.set_text(&formatted);
                                     }
                                     active_modal = None;
+                                }
+                                ModalResult::AnnotationPushToPr => {
+                                    match build_push_modal(&state, pr_info.as_ref()) {
+                                        Some((modal, hunk_map)) => {
+                                            push_hunk_map = Some(hunk_map);
+                                            active_modal = Some(modal);
+                                        }
+                                        None => {
+                                            active_modal = None;
+                                        }
+                                    }
                                 }
                                 ModalResult::AnnotationExport(filename) => {
                                     // Write annotations to file
@@ -1976,6 +2003,7 @@ fn run_app_internal(
                                     "Annotations",
                                     items,
                                     sorted_annotations,
+                                    pr_info.is_some(),
                                 ));
                             }
                         }
@@ -1995,19 +2023,11 @@ fn run_app_internal(
                             }
                         }
                         KeyCode::Char('P') => {
-                            if !state.stacked_mode && !state.annotations.is_empty() {
-                                if let Some(ref pr) = pr_info {
-                                    let hunk_map = match fetch_pr_diff(pr) {
-                                        Ok(diff) => parse_hunk_map(&diff),
-                                        Err(_) => std::collections::HashMap::new(),
-                                    };
-                                    let summary = push_review_summary(&state, &hunk_map);
-                                    push_hunk_map = Some(hunk_map);
-                                    active_modal = Some(Modal::push_review(
-                                        "Push annotations to PR",
-                                        summary,
-                                    ));
-                                }
+                            if let Some((modal, hunk_map)) =
+                                build_push_modal(&state, pr_info.as_ref())
+                            {
+                                push_hunk_map = Some(hunk_map);
+                                active_modal = Some(modal);
                             }
                         }
                         KeyCode::Char('y') => {
