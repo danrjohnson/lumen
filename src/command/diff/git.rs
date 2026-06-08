@@ -168,9 +168,29 @@ pub fn load_file_diffs(options: &DiffOptions, backend: &dyn VcsBackend) -> Vec<F
         .collect()
 }
 
-pub fn load_pr_file_diffs(pr_info: &PrInfo) -> Result<Vec<FileDiff>, String> {
+/// Fetch the PR's unified diff via `gh pr diff`.
+pub fn fetch_pr_diff(pr_info: &PrInfo) -> Result<String, String> {
     let repo_arg = format!("{}/{}", pr_info.repo_owner, pr_info.repo_name);
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "diff",
+            &pr_info.number.to_string(),
+            "--repo",
+            &repo_arg,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run gh pr diff: {}", e))?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh pr diff failed: {}", stderr.trim()));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn load_pr_file_diffs(pr_info: &PrInfo) -> Result<Vec<FileDiff>, String> {
     let mut spinner = Spinner::new(
         spinners::Dots,
         format!(
@@ -180,34 +200,13 @@ pub fn load_pr_file_diffs(pr_info: &PrInfo) -> Result<Vec<FileDiff>, String> {
         Color::Cyan,
     );
 
-    // Get PR diff to find changed files
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "diff",
-            &pr_info.number.to_string(),
-            "--repo",
-            &repo_arg,
-        ])
-        .output();
-
-    let output = match output {
-        Ok(o) => o,
+    let diff_output = match fetch_pr_diff(pr_info) {
+        Ok(d) => d,
         Err(e) => {
-            let msg = format!("Failed to run gh pr diff: {}", e);
-            spinner.fail(&msg);
-            return Err(msg);
+            spinner.fail(&e);
+            return Err(e);
         }
     };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = format!("gh pr diff failed: {}", stderr.trim());
-        spinner.fail(&msg);
-        return Err(msg);
-    }
-
-    let diff_output = String::from_utf8_lossy(&output.stdout);
     let changed_files = parse_changed_files_from_diff(&diff_output);
     let n = changed_files.len();
 
