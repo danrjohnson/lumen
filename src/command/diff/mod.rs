@@ -6,6 +6,7 @@ mod diff_algo;
 pub mod git;
 mod global_search;
 mod pr_review;
+pub use pr_review::{build_review, parse_hunk_map, ReviewEvent, ReviewPayload};
 pub mod highlight;
 mod render;
 mod search;
@@ -19,6 +20,7 @@ mod watcher;
 use std::collections::HashSet;
 use std::io;
 use std::process::{self, Command};
+use std::sync::mpsc::Sender;
 use std::thread;
 
 use spinoff::{spinners, Color, Spinner};
@@ -337,6 +339,70 @@ fn detect_current_branch_pr() -> Result<String, String> {
         return Err("No PR found for the current branch".to_string());
     }
     Ok(number)
+}
+
+/// Result of an async review push, delivered to the UI thread.
+pub enum PushResult {
+    /// Success, carrying the created review's HTML URL.
+    Ok(String),
+    /// Failure, carrying a human-readable error message.
+    Err(String),
+}
+
+/// POST a review to the PR via `gh api` (blocking). Returns the review URL on success.
+fn push_review(pr_info: &PrInfo, payload: &ReviewPayload) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let body = serde_json::to_string(payload)
+        .map_err(|e| format!("Failed to serialize review payload: {}", e))?;
+
+    let endpoint = format!(
+        "repos/{}/{}/pulls/{}/reviews",
+        pr_info.repo_owner, pr_info.repo_name, pr_info.number
+    );
+
+    let mut child = Command::new("gh")
+        .args(["api", "--method", "POST", &endpoint, "--input", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run gh api: {}", e))?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "Failed to open gh stdin".to_string())?
+        .write_all(body.as_bytes())
+        .map_err(|e| format!("Failed to write payload to gh: {}", e))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for gh: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(stderr.trim().to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Response includes "html_url":"https://github.com/owner/repo/pull/N#pullrequestreview-..."
+    let url = extract_json_string(&stdout, "html_url")
+        .unwrap_or_else(|| format!("PR #{}", pr_info.number));
+    Ok(url)
+}
+
+/// Push a review on a background thread, sending the outcome over `tx`.
+pub fn push_review_async(pr_info: &PrInfo, payload: ReviewPayload, tx: Sender<PushResult>) {
+    let pr_info = pr_info.clone();
+    thread::spawn(move || {
+        let result = match push_review(&pr_info, &payload) {
+            Ok(url) => PushResult::Ok(url),
+            Err(e) => PushResult::Err(e),
+        };
+        let _ = tx.send(result);
+    });
 }
 
 pub fn run_view_ui(
