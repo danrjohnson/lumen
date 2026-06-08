@@ -56,7 +56,8 @@ use super::types::{
 use super::watcher::{setup_watcher, WatchEvent};
 use super::{
     build_review, fetch_viewed_files, mark_file_as_viewed_async, parse_hunk_map,
-    push_review_async, unmark_file_as_viewed_async, DiffOptions, PrInfo, PushResult, ReviewEvent,
+    push_review_async, unmark_file_as_viewed_async, DiffOptions, HunkMap, PrInfo, PushResult,
+    ReviewEvent,
 };
 use spinoff::{spinners, Color, Spinner};
 
@@ -261,18 +262,11 @@ fn format_annotation_preview(annotation: &super::state::Annotation) -> String {
 }
 
 /// Build the pre-flight summary line for the push-review modal by classifying
-/// the current annotations against the PR's diff.
-fn push_review_summary(state: &AppState, pr_info: Option<&PrInfo>) -> String {
-    let Some(pr) = pr_info else {
-        return "Not in PR mode".to_string();
-    };
-    let hunk_map = match fetch_pr_diff(pr) {
-        Ok(diff) => parse_hunk_map(&diff),
-        Err(_) => std::collections::HashMap::new(),
-    };
+/// the current annotations against a previously-fetched hunk map.
+fn push_review_summary(state: &AppState, hunk_map: &HunkMap) -> String {
     let payload = build_review(
         &state.annotations,
-        &hunk_map,
+        hunk_map,
         state.diff_reference.as_deref(),
         "",
         ReviewEvent::Draft,
@@ -435,6 +429,10 @@ fn run_app_internal(
     let mut pending_events: VecDeque<Event> = VecDeque::new();
     let mut send_annotations_on_exit = false;
     let (push_tx, push_rx) = std::sync::mpsc::channel::<PushResult>();
+    // Snapshot of the PR diff's commentable lines, fetched when the push-review
+    // modal opens and reused at submit so the preflight summary matches what's
+    // actually pushed.
+    let mut push_hunk_map: Option<HunkMap> = None;
 
     'main: loop {
         if let Some(ref rx) = watch_rx {
@@ -923,14 +921,12 @@ fn run_app_internal(
                                     active_modal = None;
                                 }
                                 ModalResult::PushReviewSubmit { event, body } => {
-                                    if let Some(ref pr) = pr_info {
-                                        let hunk_map = match fetch_pr_diff(pr) {
-                                            Ok(diff) => parse_hunk_map(&diff),
-                                            Err(_) => std::collections::HashMap::new(),
-                                        };
+                                    if let (Some(pr), Some(hunk_map)) =
+                                        (pr_info.as_ref(), push_hunk_map.as_ref())
+                                    {
                                         let payload = build_review(
                                             &state.annotations,
-                                            &hunk_map,
+                                            hunk_map,
                                             state.diff_reference.as_deref(),
                                             &body,
                                             event,
@@ -1985,13 +1981,19 @@ fn run_app_internal(
                             }
                         }
                         KeyCode::Char('P') => {
-                            if pr_info.is_some()
-                                && !state.stacked_mode
-                                && !state.annotations.is_empty()
-                            {
-                                let summary = push_review_summary(&state, pr_info.as_ref());
-                                active_modal =
-                                    Some(Modal::push_review("Push annotations to PR", summary));
+                            if !state.stacked_mode && !state.annotations.is_empty() {
+                                if let Some(ref pr) = pr_info {
+                                    let hunk_map = match fetch_pr_diff(pr) {
+                                        Ok(diff) => parse_hunk_map(&diff),
+                                        Err(_) => std::collections::HashMap::new(),
+                                    };
+                                    let summary = push_review_summary(&state, &hunk_map);
+                                    push_hunk_map = Some(hunk_map);
+                                    active_modal = Some(Modal::push_review(
+                                        "Push annotations to PR",
+                                        summary,
+                                    ));
+                                }
                             }
                         }
                         KeyCode::Char('y') => {

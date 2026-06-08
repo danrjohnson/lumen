@@ -6,7 +6,7 @@ mod diff_algo;
 pub mod git;
 mod global_search;
 mod pr_review;
-pub use pr_review::{build_review, parse_hunk_map, ReviewEvent, ReviewPayload};
+pub use pr_review::{build_review, parse_hunk_map, HunkMap, ReviewEvent, ReviewPayload};
 pub mod highlight;
 mod render;
 mod search;
