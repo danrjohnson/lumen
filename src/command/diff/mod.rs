@@ -342,7 +342,7 @@ fn push_review(pr_info: &PrInfo, payload: &ReviewPayload) -> Result<String, Stri
     );
 
     let mut child = Command::new("gh")
-        .args(["api", "--method", "POST", &endpoint, "--input", "-"])
+        .args(["api", "--method", "POST", &endpoint, "--input", "-", "--jq", ".html_url"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -356,6 +356,9 @@ fn push_review(pr_info: &PrInfo, payload: &ReviewPayload) -> Result<String, Stri
         .write_all(body.as_bytes())
         .map_err(|e| format!("Failed to write payload to gh: {}", e))?;
 
+    // Close stdin so gh sees EOF and proceeds.
+    drop(child.stdin.take());
+
     let output = child
         .wait_with_output()
         .map_err(|e| format!("Failed to wait for gh: {}", e))?;
@@ -365,11 +368,14 @@ fn push_review(pr_info: &PrInfo, payload: &ReviewPayload) -> Result<String, Stri
         return Err(stderr.trim().to_string());
     }
 
+    // With `--jq .html_url`, gh prints just the review's URL (or "null" if absent).
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Response includes "html_url":"https://github.com/owner/repo/pull/N#pullrequestreview-..."
-    let url = extract_json_string(&stdout, "html_url")
-        .unwrap_or_else(|| format!("PR #{}", pr_info.number));
-    Ok(url)
+    let url = stdout.trim();
+    if url.is_empty() || url == "null" {
+        Ok(format!("PR #{}", pr_info.number))
+    } else {
+        Ok(url.to_string())
+    }
 }
 
 /// Push a review on a background thread, sending the outcome over `tx`.
