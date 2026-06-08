@@ -1,4 +1,55 @@
 use std::collections::{HashMap, HashSet};
+use serde::Serialize;
+
+/// Whether the created review is left as a draft or submitted as a comment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReviewEvent {
+    /// Create a pending/draft review. GitHub does this when `event` is omitted.
+    Draft,
+    /// Submit immediately as a non-blocking comment review (`event: "COMMENT"`).
+    Comment,
+}
+
+/// Serialize ReviewEvent as the `event` field: omitted for Draft, "COMMENT" otherwise.
+fn serialize_event<S>(event: &ReviewEvent, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match event {
+        ReviewEvent::Draft => s.serialize_none(),
+        ReviewEvent::Comment => s.serialize_some("COMMENT"),
+    }
+}
+
+/// Returns true when the event must be omitted from the JSON body.
+fn event_is_draft(event: &ReviewEvent) -> bool {
+    matches!(event, ReviewEvent::Draft)
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ReviewComment {
+    pub path: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<String>,
+    /// "file" for whole-file comments; omitted for line comments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_type: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ReviewPayload {
+    pub body: String,
+    #[serde(serialize_with = "serialize_event", skip_serializing_if = "event_is_draft")]
+    pub event: ReviewEvent,
+    pub comments: Vec<ReviewComment>,
+}
 
 /// Commentable line numbers for one file, split by diff side.
 /// RIGHT = new-file line numbers (added + context).
@@ -155,5 +206,44 @@ diff --git a/c.rs b/c.rs
         let c = map.get("c.rs").expect("c.rs present");
         assert_eq!(c.right, HashSet::from([5]));
         assert_eq!(c.left, HashSet::from([5]));
+    }
+
+    #[test]
+    fn review_payload_serializes_draft_without_event_field() {
+        let payload = ReviewPayload {
+            body: "top-level note".to_string(),
+            event: ReviewEvent::Draft,
+            comments: vec![ReviewComment {
+                path: "src/foo.rs".to_string(),
+                body: "inline".to_string(),
+                line: Some(11),
+                side: Some("RIGHT".to_string()),
+                start_line: None,
+                start_side: None,
+                subject_type: None,
+            }],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+
+        // Draft => `event` key omitted entirely (GitHub creates a PENDING review).
+        assert!(json.get("event").is_none());
+        assert_eq!(json["body"], "top-level note");
+        assert_eq!(json["comments"][0]["path"], "src/foo.rs");
+        assert_eq!(json["comments"][0]["line"], 11);
+        assert_eq!(json["comments"][0]["side"], "RIGHT");
+        // None fields are omitted, not null.
+        assert!(json["comments"][0].get("start_line").is_none());
+        assert!(json["comments"][0].get("subject_type").is_none());
+    }
+
+    #[test]
+    fn review_payload_serializes_comment_event() {
+        let payload = ReviewPayload {
+            body: String::new(),
+            event: ReviewEvent::Comment,
+            comments: vec![],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["event"], "COMMENT");
     }
 }
