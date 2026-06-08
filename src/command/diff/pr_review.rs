@@ -144,7 +144,7 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
 fn panel_side(panel: DiffPanelFocus) -> &'static str {
     match panel {
         DiffPanelFocus::Old => "LEFT",
-        _ => "RIGHT",
+        DiffPanelFocus::New | DiffPanelFocus::None => "RIGHT",
     }
 }
 
@@ -187,6 +187,8 @@ pub fn build_review(
                 };
 
                 if in_diff(*start_line) && in_diff(*end_line) {
+                    // An annotation's range lives on a single panel, so the
+                    // start and end of a multi-line comment share one side.
                     let (start_line_field, start_side_field) = if start_line == end_line {
                         (None, None)
                     } else {
@@ -477,5 +479,42 @@ diff --git a/c.rs b/c.rs
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["event"], "COMMENT");
+    }
+
+    #[test]
+    fn build_review_rolls_up_annotation_for_file_absent_from_hunk_map() {
+        let map = sample_map(); // only contains "src/foo.rs"
+        let annotations = vec![ann(
+            1,
+            "src/other.rs",
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::New, start_line: 1, end_line: 1 },
+            "note on untracked file",
+        )];
+        let payload = build_review(&annotations, &map, None, "", ReviewEvent::Draft);
+
+        // File not in the hunk map => cannot anchor => rolled up.
+        assert!(payload.comments.is_empty());
+        assert!(payload.body.contains("note on untracked file"));
+        assert!(payload.body.contains("src/other.rs"));
+    }
+
+    #[test]
+    fn build_review_user_body_precedes_rollup_section() {
+        let map = sample_map();
+        let annotations = vec![ann(
+            1,
+            "src/foo.rs",
+            // line 99 is outside the diff => rolled up.
+            AnnotationTarget::LineRange { panel: DiffPanelFocus::New, start_line: 99, end_line: 99 },
+            "stray note",
+        )];
+        let payload = build_review(&annotations, &map, None, "Overall LGTM", ReviewEvent::Comment);
+
+        assert!(payload.body.starts_with("Overall LGTM"));
+        let body_pos = payload.body.find("Overall LGTM").unwrap();
+        let rollup_pos = payload.body.find("stray note").expect("rollup present");
+        // User body comes before the rolled-up notes section.
+        assert!(body_pos < rollup_pos);
+        assert!(payload.body.contains("Notes that couldn't be anchored"));
     }
 }
